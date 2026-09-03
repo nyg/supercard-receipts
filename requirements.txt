@@ -1,0 +1,3 @@
+browser-cookie3==0.20.1
+mycdp==1.4.0
+seleniumbase==4.53.6

@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+downloaded_files/
+latest_logs/
+tickets/
