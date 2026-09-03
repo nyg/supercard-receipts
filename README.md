@@ -37,7 +37,7 @@ An explicit range:
 | `--out DIR` | `./tickets` | Where to write the PDFs |
 | `--warranties` | off | Also fetch the guarantee PDF of purchases that have one |
 
-Files are named `2026-08-28_201015_Crissier_84.95CHF.pdf`. Existing files are left alone, so an interrupted run resumes where it stopped.
+Files are named `<date>_<time>_<store>_<total>CHF.pdf`, for example `2024-03-15_181200_Lausanne_42.50CHF.pdf`. Existing files are left alone, so an interrupted run resumes where it stopped.
 
 On the first run macOS raises a Keychain prompt for **Brave Safe Storage**. Approve it (*Always Allow*) or the cookie read blocks indefinitely.
 
