@@ -1,42 +1,3 @@
-"""
-download-tickets.py
-
-Downloads the digital till receipts (tickets de caisse) from
-supercard.ch as PDFs, for a given date range.
-
-It drives a fresh Brave instance through SeleniumBase's Pure CDP Mode
-(native async API) and injects the session cookies read out of the local
-Brave profile, so an already-logged-in Brave session carries over.
-
-USAGE
-    python download-tickets.py                          # current year
-    python download-tickets.py --from 2024-01-01 --to 2024-06-30
-    python download-tickets.py --out ~/receipts --warranties
-
-WHY NOT JUST POINT AT THE LIVE BRAVE PROFILE DIRECTORY?
-CDP Mode only supports a `user_data_dir` that a prior CDP Mode session
-created. Pointing it at the everyday Brave profile breaks (profile lock
-conflicts, "restore pages?" prompts, or an uncontrolled window). So:
-  1. Read the session cookies out of the real Brave profile
-     (`browser_cookie3` handles Brave's on-disk cookie decryption).
-  2. Launch a fresh Brave instance under CDP control.
-  3. Inject those cookies via Network.setCookies before navigating.
-
-REQUIREMENTS
-    pip install -r requirements.txt
-
-IMPORTANT
-- Fully close Brave before running. Chromium-based browsers lock their
-  cookie database while running, which makes extraction fail or return
-  stale data.
-- macOS will raise a Keychain prompt for "Brave Safe Storage" on the
-  first run; approve it (Always Allow) or the read blocks.
-- You must already be logged in to supercard.ch in Brave.
-- On Windows with recent Chrome/Brave builds, app-bound encryption can
-  defeat `browser_cookie3`. If it returns nothing, try `rookiepy`
-  (`pip install rookiepy`, `rookiepy.brave(["supercard.ch"])`).
-"""
-
 import argparse
 import asyncio
 import base64
@@ -44,6 +5,7 @@ import datetime as dt
 import json
 import platform
 import re
+import shutil
 from pathlib import Path
 
 import browser_cookie3
@@ -61,6 +23,121 @@ SAME_SITE = {
     "lax": network.CookieSameSite.LAX,
     "none": network.CookieSameSite.NONE,
 }
+
+HOME = Path.home()
+
+BROWSERS = {
+    "brave": {
+        "label": "Brave",
+        "Darwin": ["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"],
+        "Windows": [
+            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+            r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
+            str(HOME / "AppData/Local/BraveSoftware/Brave-Browser/Application/brave.exe"),
+        ],
+        "Linux": [
+            "/usr/bin/brave-browser",
+            "/usr/bin/brave",
+            "/opt/brave.com/brave/brave",
+            "/snap/bin/brave",
+        ],
+        "commands": ["brave-browser", "brave"],
+    },
+    "chrome": {
+        "label": "Google Chrome",
+        "Darwin": ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"],
+        "Windows": [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            str(HOME / "AppData/Local/Google/Chrome/Application/chrome.exe"),
+        ],
+        "Linux": [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/opt/google/chrome/chrome",
+        ],
+        "commands": ["google-chrome", "google-chrome-stable"],
+    },
+    "chromium": {
+        "label": "Chromium",
+        "Darwin": ["/Applications/Chromium.app/Contents/MacOS/Chromium"],
+        "Windows": [
+            str(HOME / "AppData/Local/Chromium/Application/chrome.exe"),
+            r"C:\Program Files\Chromium\Application\chrome.exe",
+        ],
+        "Linux": [
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+        ],
+        "commands": ["chromium", "chromium-browser"],
+    },
+    "edge": {
+        "label": "Microsoft Edge",
+        "Darwin": ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+        "Windows": [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ],
+        "Linux": [
+            "/usr/bin/microsoft-edge",
+            "/usr/bin/microsoft-edge-stable",
+            "/opt/microsoft/msedge/msedge",
+        ],
+        "commands": ["microsoft-edge", "microsoft-edge-stable"],
+    },
+    "vivaldi": {
+        "label": "Vivaldi",
+        "Darwin": ["/Applications/Vivaldi.app/Contents/MacOS/Vivaldi"],
+        "Windows": [
+            r"C:\Program Files\Vivaldi\Application\vivaldi.exe",
+            str(HOME / "AppData/Local/Vivaldi/Application/vivaldi.exe"),
+        ],
+        "Linux": [
+            "/usr/bin/vivaldi",
+            "/usr/bin/vivaldi-stable",
+            "/opt/vivaldi/vivaldi",
+        ],
+        "commands": ["vivaldi", "vivaldi-stable"],
+    },
+    "opera": {
+        "label": "Opera",
+        "Darwin": ["/Applications/Opera.app/Contents/MacOS/Opera"],
+        "Windows": [str(HOME / "AppData/Local/Programs/Opera/opera.exe")],
+        "Linux": ["/usr/bin/opera", "/snap/bin/opera"],
+        "commands": ["opera"],
+    },
+    "opera_gx": {
+        "label": "Opera GX",
+        "Darwin": ["/Applications/Opera GX.app/Contents/MacOS/Opera"],
+        "Windows": [str(HOME / "AppData/Local/Programs/Opera GX/opera.exe")],
+        "Linux": [],
+        "commands": [],
+    },
+    "arc": {
+        "label": "Arc",
+        "Darwin": ["/Applications/Arc.app/Contents/MacOS/Arc"],
+        "Windows": [str(HOME / "AppData/Local/Packages/TheBrowserCompany.Arc/Arc.exe")],
+        "Linux": [],
+        "commands": [],
+    },
+    "firefox": {"label": "Firefox", "platforms": {"Darwin", "Linux", "Windows"}},
+    "librewolf": {"label": "LibreWolf", "platforms": {"Darwin", "Linux", "Windows"}},
+    "safari": {"label": "Safari", "platforms": {"Darwin"}},
+}
+
+CHROMIUM_BROWSERS = [
+    name for name, spec in BROWSERS.items() if "commands" in spec
+]
+
+COOKIE_BROWSERS = [
+    name for name in BROWSERS if hasattr(browser_cookie3, name)
+]
+
+AUTODETECT_ORDER = [
+    "brave", "chrome", "firefox", "edge", "safari", "chromium",
+    "vivaldi", "arc", "librewolf", "opera", "opera_gx",
+]
 
 FETCH_JSON_JS = """
 (async () => {
@@ -85,38 +162,57 @@ FETCH_PDF_JS = """
 """
 
 
-def find_brave_binary() -> str | None:
-    system = platform.system()
-    if system == "Windows":
-        candidates = [
-            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-            r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
-            str(Path.home() / "AppData/Local/BraveSoftware/Brave-Browser/Application/brave.exe"),
-        ]
-    elif system == "Darwin":
-        candidates = ["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"]
-    else:
-        candidates = ["/usr/bin/brave-browser", "/opt/brave.com/brave/brave", "/snap/bin/brave"]
+def label(browser: str) -> str:
+    return BROWSERS[browser]["label"]
 
-    for path in candidates:
+
+def supports_platform(browser: str) -> bool:
+    system = platform.system()
+    spec = BROWSERS[browser]
+    if "platforms" in spec:
+        return system in spec["platforms"]
+    return bool(spec.get(system) or spec.get("commands"))
+
+
+def find_browser_binary(browser: str) -> str | None:
+    spec = BROWSERS[browser]
+    if "commands" not in spec:
+        return None
+    for path in spec.get(platform.system(), []):
         if Path(path).exists():
             return path
+    for command in spec["commands"]:
+        found = shutil.which(command)
+        if found:
+            return found
     return None
 
 
-BRAVE_PATH = find_brave_binary()
+def read_cookies(browser: str) -> list:
+    return list(getattr(browser_cookie3, browser)(domain_name=COOKIE_DOMAIN))
 
 
-def get_brave_cookies() -> list[network.CookieParam]:
-    try:
-        jar = browser_cookie3.brave(domain_name=COOKIE_DOMAIN)
-    except Exception as e:
-        raise SystemExit(
-            "Could not read Brave's cookies. Make sure Brave is fully closed "
-            "and that you're running as the same OS user as the Brave "
-            f"profile.\nDetails: {e}"
-        )
+def detect_cookie_browser() -> tuple[str, list]:
+    tried = []
+    for browser in AUTODETECT_ORDER:
+        if browser not in COOKIE_BROWSERS or not supports_platform(browser):
+            continue
+        tried.append(label(browser))
+        try:
+            jar = read_cookies(browser)
+        except Exception:
+            continue
+        if jar:
+            return browser, jar
 
+    raise SystemExit(
+        f"No {COOKIE_DOMAIN} cookies found in any supported browser "
+        f"(tried: {', '.join(tried)}).\nLog in to {ORIGIN} in one of them, "
+        "close it, then re-run — or pass --cookies-from BROWSER explicitly."
+    )
+
+
+def to_cookie_params(jar) -> list[network.CookieParam]:
     params = []
     for c in jar:
         rest = {k.lower(): v for k, v in (c._rest or {}).items()}
@@ -135,6 +231,60 @@ def get_brave_cookies() -> list[network.CookieParam]:
             )
         )
     return params
+
+
+def collect_cookies(browser: str | None) -> tuple[str, list[network.CookieParam]]:
+    if browser is None:
+        browser, jar = detect_cookie_browser()
+        return browser, to_cookie_params(jar)
+
+    if not supports_platform(browser):
+        raise SystemExit(f"{label(browser)} is not available on {platform.system()}.")
+
+    try:
+        jar = read_cookies(browser)
+    except Exception as e:
+        raise SystemExit(
+            f"Could not read {label(browser)}'s cookies. Make sure it is fully "
+            "closed and that you are running as the same OS user as its "
+            f"profile.\nDetails: {e}"
+        )
+
+    if not jar:
+        raise SystemExit(
+            f"No {COOKIE_DOMAIN} cookies found in {label(browser)}. Log in to "
+            f"{ORIGIN} there, close it, then re-run."
+        )
+    return browser, to_cookie_params(jar)
+
+
+def resolve_driver(browser: str | None, path: str | None, cookie_browser: str) -> str:
+    if path:
+        if not Path(path).exists():
+            raise SystemExit(f"--browser-path does not exist: {path}")
+        return path
+
+    if browser:
+        found = find_browser_binary(browser)
+        if not found:
+            raise SystemExit(
+                f"Could not find the {label(browser)} binary. Pass "
+                "--browser-path /path/to/binary."
+            )
+        return found
+
+    candidates = [cookie_browser] if cookie_browser in CHROMIUM_BROWSERS else []
+    candidates += [b for b in AUTODETECT_ORDER if b in CHROMIUM_BROWSERS]
+    for candidate in candidates:
+        found = find_browser_binary(candidate)
+        if found:
+            return found
+
+    raise SystemExit(
+        "Could not find any Chromium-based browser to drive. Install one of "
+        f"{', '.join(label(b) for b in CHROMIUM_BROWSERS)}, or pass "
+        "--browser-path."
+    )
 
 
 async def fetch_json(tab, url: str) -> dict:
@@ -238,6 +388,27 @@ def parse_args() -> argparse.Namespace:
         "--warranties", action="store_true",
         help="also download the warranty PDF of purchases that have one",
     )
+    parser.add_argument(
+        "--cookies-from", dest="cookie_browser", choices=COOKIE_BROWSERS,
+        metavar="BROWSER",
+        help=(
+            "browser whose supercard.ch session to reuse: "
+            f"{', '.join(COOKIE_BROWSERS)} (default: the first one that has any)"
+        ),
+    )
+    parser.add_argument(
+        "--browser", dest="driver_browser", choices=CHROMIUM_BROWSERS,
+        metavar="BROWSER",
+        help=(
+            "Chromium-based browser to drive: "
+            f"{', '.join(CHROMIUM_BROWSERS)} (default: the cookie source when "
+            "it is Chromium-based, else the first one installed)"
+        ),
+    )
+    parser.add_argument(
+        "--browser-path", dest="driver_path",
+        help="explicit path to the browser binary to drive",
+    )
     args = parser.parse_args()
     if args.date_from > args.date_to:
         parser.error("--from must not be later than --to")
@@ -245,24 +416,25 @@ def parse_args() -> argparse.Namespace:
 
 
 async def run(args: argparse.Namespace) -> None:
-    cookies = get_brave_cookies()
-    if not cookies:
-        raise SystemExit(
-            "No cookies found for supercard.ch in Brave. Log in to "
-            "supercard.ch in Brave, close Brave, then re-run."
-        )
+    cookie_browser, cookies = collect_cookies(args.cookie_browser)
+    print(f"Read {len(cookies)} cookie(s) from {label(cookie_browser)}.")
 
-    kwargs = {}
-    if BRAVE_PATH:
-        kwargs["browser_executable_path"] = BRAVE_PATH
-        print(f"Launching Brave from: {BRAVE_PATH}")
-    else:
+    driver_path = resolve_driver(
+        args.driver_browser, args.driver_path, cookie_browser
+    )
+    print(f"Launching: {driver_path}")
+
+    if cookie_browser not in CHROMIUM_BROWSERS or (
+        args.driver_browser and args.driver_browser != cookie_browser
+    ):
         print(
-            "Could not auto-detect Brave; set BRAVE_PATH manually if this "
-            "launches the wrong browser."
+            f"Note: the cookies come from {label(cookie_browser)} but a "
+            "different browser is being driven. DataDome ties its token to "
+            "the browser fingerprint, so the purchases page may refuse to "
+            "load. If it does, use a Chromium-based browser for both."
         )
 
-    browser = await cdp_util.start_async(**kwargs)
+    browser = await cdp_util.start_async(browser_executable_path=driver_path)
     try:
         tab = await browser.get(f"{ORIGIN}/")
         await tab.wait(3)
@@ -276,7 +448,8 @@ async def run(args: argparse.Namespace) -> None:
         if await tab.get_title() != "Mes achats":
             raise SystemExit(
                 "The purchases page did not load as a logged-in session. Log "
-                "in to supercard.ch in Brave, close Brave, then re-run."
+                f"in to {ORIGIN} in {label(cookie_browser)}, close it, then "
+                "re-run."
             )
 
         print(f"Listing purchases from {args.date_from} to {args.date_to}...")
