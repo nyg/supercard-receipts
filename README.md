@@ -70,14 +70,15 @@ macOS, Linux and Windows. The cookie decryption is what differs per platform.
 
 1. `browser_cookie3` reads and decrypts the supercard.ch cookies from the browser profile on disk.
 2. A fresh Chromium-based browser starts under SeleniumBase's Pure CDP Mode, using its native async API (`cdp_util.start_async`).
-3. The cookies go in through `Network.setCookies`, which carries over both the login session (`oauthTokens`) and the already-validated `datadome` token.
+3. The cookies go in through `Network.setCookies`, which carries over the site session (`CMSSESSIONID`), the Supercard ID single sign-on cookie (`TGC` on `login.supercard.ch`) and the already-validated `datadome` token.
 4. The purchases page is loaded, and the site's own endpoints are called from inside it with `fetch(..., {credentials: 'include'})`, so every request looks exactly like one the page itself made.
+5. If the listing is refused because the site session has expired, the script follows the page's own login link once. Supercard ID recognises the single sign-on cookie, sends the browser straight back, and the listing is retried.
 
 The two endpoints, both reverse-engineered from the page's script at `libs.coop.ch/digital-receipt/prod/script-foot.js`:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `/bin/coop/supercard/digitalReceipt/getPurchases.json` | Listing. Takes `dateMin` / `dateMax` as `YYYY-MM-DD`. |
+| `/bin/coop/supercard/digitalReceipt/getPurchases.json` | Listing. Takes `dateMin` / `dateMax` as `YYYY-MM-DD`. Answers `401` without a logged-in session. |
 | `/bin/coop/kbk/kassenzettelpoc?bc=<encBarcode>&pdfType=receipt` | The PDF for one purchase. |
 
 ## Notes and gotchas
@@ -89,6 +90,10 @@ Some of these cost real time to rediscover, so they are written down here.
 **Cookies must be `mycdp.network.CookieParam` objects, with `expires` wrapped in `network.TimeSinceEpoch`.** `CookieParam.to_json()` calls `self.expires.to_json()`, which a plain `float` does not have, and `Network.setCookies` calls `to_json()` on every entry, so plain dicts fail the same way. Both failures are easy to miss: they surface as cookies silently not being set.
 
 **`Network.setCookies` is a no-op on `about:blank`.** The browser navigates to the domain before injecting, and only then to the target page.
+
+**The purchases page says nothing about whether you are logged in.** Anonymous visitors get the same page at the same URL with the same title (`Mes achats – Supercard`), just without receipts in it. The script used to compare the title to detect a login and broke the day the site renamed it, so the login check is now the listing endpoint itself: a `401` or `403` from `getPurchases.json` means the session was not accepted. The page has also moved once already, from `/fr/appli-services-numerique/mes-achats.html` to `/fr/profiter/avantages/mes-achats.html`; the old address still redirects.
+
+**Being logged in in your browser does not mean the cookies on disk hold a live session.** The site session is a `CMSSESSIONID` session cookie on `www.supercard.ch` that stops being accepted a short while after your last page view. Your browser hides this, because the long-lived `TGC` cookie on `login.supercard.ch` signs you back in whenever you return. Replaying only the cookies therefore works minutes after a visit and gets a `401` later. That is why the script signs in again through the page's `_loginLink` (an OIDC authorize URL on `login.supercard.ch/cas`) when the listing is refused. If Supercard ID shows its login form instead of bouncing back, the single sign-on cookie is gone too and you have to log in again in your browser.
 
 **Without valid cookies the site serves a DataDome interstitial** — a page whose body is empty and which quietly loads `geo.captcha-delivery.com`. If you see an empty page instead of receipts, the cookies did not make it in.
 

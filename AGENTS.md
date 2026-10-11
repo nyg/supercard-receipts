@@ -50,6 +50,8 @@ These are load-bearing and were expensive to find. `README.md` explains each in 
 - Cookies must be `mycdp.network.CookieParam` objects with `expires` wrapped in `network.TimeSinceEpoch`. Plain dicts or floats fail silently.
 - `Network.setCookies` is a no-op on `about:blank`, so the browser navigates to the origin before injecting.
 - `getPurchases.json` pagination is cursor-based via the last item's `endtimestamp`. The `currentPage` parameter does nothing past page 0.
+- Login state comes from the status of `getPurchases.json`, never from the page. The purchases page loads with the same URL and title for anonymous visitors.
+- The `CMSSESSIONID` site session on disk has often expired. A refused listing is followed by one sign-in through the page's `_loginLink`, which the `TGC` single sign-on cookie completes without credentials.
 - Never point CDP Mode at a live browser profile via `user_data_dir`. That is the entire reason cookies are extracted and re-injected.
 - Requests are made with in-page `fetch(..., {credentials: 'include'})` rather than a Python HTTP client, so DataDome sees a genuine same-origin request from the page.
 
