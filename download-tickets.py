@@ -174,18 +174,26 @@ def supports_platform(browser: str) -> bool:
     return bool(spec.get(system) or spec.get("commands"))
 
 
-def find_browser_binary(browser: str) -> str | None:
+def candidate_binaries(browser: str) -> list[str]:
     spec = BROWSERS[browser]
     if "commands" not in spec:
-        return None
-    for path in spec.get(platform.system(), []):
+        return []
+    on_path = [shutil.which(command) for command in spec["commands"]]
+    return [*spec.get(platform.system(), []), *filter(None, on_path)]
+
+
+def find_browser_binary(browser: str) -> str | None:
+    for path in candidate_binaries(browser):
         if Path(path).exists():
             return path
-    for command in spec["commands"]:
-        found = shutil.which(command)
-        if found:
-            return found
     return None
+
+
+def is_binary_of(path: str, browser: str) -> bool:
+    return any(
+        Path(candidate).exists() and Path(candidate).samefile(path)
+        for candidate in candidate_binaries(browser)
+    )
 
 
 def read_cookies(browser: str) -> list:
@@ -424,14 +432,13 @@ async def run(args: argparse.Namespace) -> None:
     )
     print(f"Launching: {driver_path}")
 
-    if cookie_browser not in CHROMIUM_BROWSERS or (
-        args.driver_browser and args.driver_browser != cookie_browser
-    ):
+    if not is_binary_of(driver_path, cookie_browser):
         print(
-            f"Note: the cookies come from {label(cookie_browser)} but a "
-            "different browser is being driven. DataDome ties its token to "
-            "the browser fingerprint, so the purchases page may refuse to "
-            "load. If it does, use a Chromium-based browser for both."
+            f"Note: the cookies come from {label(cookie_browser)} but the "
+            "browser being driven does not look like the same one. DataDome "
+            "ties its token to the browser fingerprint, so the purchases page "
+            "may refuse to load. If it does, use the same Chromium-based "
+            "browser for both."
         )
 
     browser = await cdp_util.start_async(browser_executable_path=driver_path)
