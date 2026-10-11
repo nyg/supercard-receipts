@@ -13,10 +13,13 @@ from mycdp import network
 from seleniumbase.undetected.cdp_driver import cdp_util
 
 ORIGIN = "https://www.supercard.ch"
-PURCHASES_PAGE = f"{ORIGIN}/fr/appli-services-numerique/mes-achats.html"
+PURCHASES_PAGE = f"{ORIGIN}/fr/profiter/avantages/mes-achats.html"
 PURCHASES_API = "/bin/coop/supercard/digitalReceipt/getPurchases.json"
 RECEIPT_API = "/bin/coop/kbk/kassenzettelpoc"
 COOKIE_DOMAIN = "supercard.ch"
+SESSION_REFUSED_STATUSES = {401, 403}
+SIGN_IN_TIMEOUT_SECONDS = 20
+LOGIN_LINK_JS = "typeof _loginLink === 'string' ? _loginLink : ''"
 
 SAME_SITE = {
     "strict": network.CookieSameSite.STRICT,
@@ -295,9 +298,15 @@ def resolve_driver(browser: str | None, path: str | None, cookie_browser: str) -
     )
 
 
+class SessionRefused(Exception):
+    pass
+
+
 async def fetch_json(tab, url: str) -> dict:
     raw = await tab.evaluate(FETCH_JSON_JS % json.dumps(url), await_promise=True)
     result = json.loads(raw)
+    if result.get("error") in SESSION_REFUSED_STATUSES:
+        raise SessionRefused(f"the purchases listing answered HTTP {result['error']}")
     if "error" in result:
         raise RuntimeError(f"{url} returned {result['error']}")
     return result["data"]
@@ -334,6 +343,38 @@ async def list_purchases(tab, date_from: dt.date, date_to: dt.date) -> list[dict
             break
         cursor = next_cursor
     return purchases
+
+
+async def current_origin(tab) -> str | None:
+    try:
+        return await tab.get_origin()
+    except Exception:
+        return None
+
+
+async def sign_in_again(browser, tab) -> None:
+    login_link = await tab.evaluate(LOGIN_LINK_JS)
+    if not login_link:
+        raise SessionRefused("the purchases page offered no login link")
+
+    await browser.get(login_link)
+    for _ in range(SIGN_IN_TIMEOUT_SECONDS):
+        await tab.wait(1)
+        if await current_origin(tab) == ORIGIN:
+            await tab.wait(3)
+            return
+    raise SessionRefused("Supercard ID did not sign in on its own")
+
+
+async def list_purchases_signed_in(
+    browser, tab, date_from: dt.date, date_to: dt.date
+) -> list[dict]:
+    try:
+        return await list_purchases(tab, date_from, date_to)
+    except SessionRefused:
+        print("The site session has expired, signing in again through Supercard ID...")
+    await sign_in_again(browser, tab)
+    return await list_purchases(tab, date_from, date_to)
 
 
 def receipt_filename(purchase: dict, kind: str) -> str:
@@ -452,15 +493,17 @@ async def run(args: argparse.Namespace) -> None:
         tab = await browser.get(PURCHASES_PAGE)
         await tab.wait(5)
 
-        if await tab.get_title() != "Mes achats":
-            raise SystemExit(
-                "The purchases page did not load as a logged-in session. Log "
-                f"in to {ORIGIN} in {label(cookie_browser)}, close it, then "
-                "re-run."
-            )
-
         print(f"Listing purchases from {args.date_from} to {args.date_to}...")
-        purchases = await list_purchases(tab, args.date_from, args.date_to)
+        try:
+            purchases = await list_purchases_signed_in(
+                browser, tab, args.date_from, args.date_to
+            )
+        except SessionRefused as refusal:
+            raise SystemExit(
+                "supercard.ch did not accept the session read from "
+                f"{label(cookie_browser)}: {refusal}. Log in to {ORIGIN} in "
+                f"{label(cookie_browser)}, close it, then re-run."
+            )
         print(f"Found {len(purchases)} purchase(s).")
 
         saved = await download_all(tab, purchases, args.out_dir, args.warranties)
